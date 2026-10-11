@@ -852,7 +852,7 @@
 
     <div class="join-actions reveal">
       <button class="mc-btn" id="joinCopyBtn">📋 一键复制服务器地址</button>
-      <a class="mc-btn melon-btn" href="NaMelon's-Server专用客户端.zip" download="NaMelon's-Server专用客户端.zip">⬇️ 下载专用客户端</a>
+      <a class="mc-btn melon-btn" href="https://github.com/NaMelon1109/Server/releases/download/V1.0/NaMelon.zip">⬇️ 下载专用客户端</a>
       <a class="mc-btn alt" href="#status">🔄 查看在线状态</a>
     </div>
   </div>
@@ -942,7 +942,17 @@ document.getElementById('navIp').addEventListener('click', e => copyIp(e.current
 document.getElementById('footIp').addEventListener('click', e => copyIp(e.currentTarget));
 document.getElementById('mobileCopyBtn').addEventListener('click', e => copyIp(e.currentTarget));
 
-/* ================= 实时状态查询（mcsrvstat.us 公共接口，失败自动降级） ================= */
+/* ================= 实时状态查询（多源自动回退） =================
+   1) /api/status        —— Cloudflare Worker 同源代理（部署 worker.js 后生效，404 时自动跳过）
+   2) api.mcsrvstat.us   —— 公共查询接口
+   3) api.mcstatus.io    —— 备用公共接口
+   三种返回格式统一归一化后渲染，任一成功即停止。 */
+const STATUS_SOURCES = [
+  '/api/status',
+  'https://api.mcsrvstat.us/3/' + encodeURIComponent(SERVER_HOST),
+  'https://api.mcstatus.io/v2/status/java/' + encodeURIComponent(SERVER_HOST)
+];
+
 const lampEl = document.getElementById('heroLamp');
 const heroStatusEl = document.getElementById('heroStatusText');
 const sOnline = document.getElementById('sOnline');
@@ -951,10 +961,35 @@ const sVersion = document.getElementById('sVersion');
 const motdBox = document.getElementById('motdBox');
 const playerChips = document.getElementById('playerChips');
 
-function escapeHtml(s) {
-  return String(s).replace(/[&<>"']/g, c => ({
-    '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'
-  }[c]));
+function normalizeStatus(d) {
+  if (!d || typeof d.online !== 'boolean') return null;
+  const p = d.players || {};
+
+  // 版本：mcsrvstat 为字符串/数组，mcstatus.io 为 { name_clean }
+  const v = d.version;
+  let ver = Array.isArray(v) ? v.join(' / ') : (v && typeof v === 'object' ? (v.name_clean || v.name_raw) : v);
+  ver = String(ver || '').replace(/^[0-9. ]+/, m => m.trim()) || '未知';
+
+  // MOTD：mcsrvstat 的 clean 是数组，mcstatus.io 的 clean 是字符串
+  let motd = '';
+  if (d.motd) {
+    if (Array.isArray(d.motd.clean)) motd = d.motd.clean.join('\n');
+    else if (typeof d.motd.clean === 'string') motd = d.motd.clean;
+    else if (typeof d.motd.raw === 'string') motd = d.motd.raw.replace(/§./g, '');
+  }
+
+  // 玩家名单：mcsrvstat 用 name，mcstatus.io 用 name_clean
+  const list = (Array.isArray(p.list) ? p.list : [])
+    .map(x => (x && typeof x === 'object') ? (x.name || x.name_clean || '') : String(x || ''))
+    .filter(Boolean)
+    .slice(0, 30);
+
+  return {
+    online: d.online,
+    players: { online: p.online || 0, max: p.max || 0, list },
+    version: ver,
+    motd
+  };
 }
 
 function renderStatus(data) {
@@ -963,37 +998,28 @@ function renderStatus(data) {
   lampEl.classList.toggle('on', online);
 
   if (online) {
-    const p = data.players || {};
-    heroStatusEl.textContent = `🟢 服务器在线 · ${p.online || 0}/${p.max || 0} 名玩家`;
+    const p = data.players;
+    heroStatusEl.textContent = `🟢 服务器在线 · ${p.online}/${p.max} 名玩家`;
 
     sOnline.textContent = '在线 ONLINE';
     sOnline.className = 'value green';
 
-    sPlayers.textContent = `${p.online || 0} / ${p.max || 0}`;
+    sPlayers.textContent = `${p.online} / ${p.max}`;
     sPlayers.className = 'value green';
 
-    const ver = (data.version && Array.isArray(data.version) ? data.version.join(' / ') : data.version) || '未知';
-    sVersion.textContent = String(ver).replace(/^[0-9. ]+/, m => m.trim()).slice(0, 18);
+    sVersion.textContent = data.version.slice(0, 18);
     sVersion.className = 'value';
 
-    // MOTD
-    let motd = '';
-    if (data.motd) {
-      if (Array.isArray(data.motd.clean)) motd = data.motd.clean.join('\n');
-      else if (typeof data.motd.raw === 'string') motd = data.motd.raw.replace(/§./g, '');
-    }
-    motdBox.textContent = motd || '欢迎来到 Minecraft Melon 服务器 🍉';
+    motdBox.textContent = data.motd || '欢迎来到 Minecraft Melon 服务器 🍉';
 
     // 在线玩家名单（接口提供时）
     playerChips.innerHTML = '';
-    if (Array.isArray(p.list) && p.list.length) {
-      p.list.slice(0, 30).forEach(pl => {
-        const chip = document.createElement('span');
-        chip.className = 'pixel';
-        chip.textContent = '🧑‍🌾 ' + pl.name;
-        playerChips.appendChild(chip);
-      });
-    }
+    p.list.forEach(name => {
+      const chip = document.createElement('span');
+      chip.className = 'pixel';
+      chip.textContent = '🧑‍🌾 ' + name;
+      playerChips.appendChild(chip);
+    });
   } else {
     heroStatusEl.textContent = '🔴 服务器当前离线或状态查询失败';
     sOnline.textContent = '离线 OFFLINE';
@@ -1005,19 +1031,28 @@ function renderStatus(data) {
   }
 }
 
-async function fetchStatus() {
+async function tryFetchStatus(url) {
   const ctrl = new AbortController();
-  const timer = setTimeout(() => ctrl.abort(), 9000);
+  const timer = setTimeout(() => ctrl.abort(), 7000);
   try {
-    const res = await fetch('https://api.mcsrvstat.us/3/' + encodeURIComponent(SERVER_HOST), { signal: ctrl.signal });
-    clearTimeout(timer);
-    if (!res.ok) throw new Error('bad status');
-    const data = await res.json();
-    renderStatus(data);
+    const res = await fetch(url, { signal: ctrl.signal });
+    if (!res.ok) return null;
+    return normalizeStatus(await res.json());
   } catch (e) {
+    return null;
+  } finally {
     clearTimeout(timer);
-    renderStatus(null);
   }
+}
+
+async function fetchStatus() {
+  for (const url of STATUS_SOURCES) {
+    // 本地双击打开（file://）时没有同源代理端点，直接跳过
+    if (url.startsWith('/') && location.protocol === 'file:') continue;
+    const data = await tryFetchStatus(url);
+    if (data) { renderStatus(data); return; }
+  }
+  renderStatus(null);
 }
 
 fetchStatus();
